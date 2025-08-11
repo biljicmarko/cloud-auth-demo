@@ -28,7 +28,6 @@ module "network" {
   location = local.location
 }
 
-
 module "vm" {
   source              = "./modules/vm"
   name                = local.project
