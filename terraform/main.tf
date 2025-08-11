@@ -13,11 +13,9 @@ terraform {
   }
 }
 
-
 provider "azurerm" {
   features {}
 }
-
 
 locals {
   project  = "cloud-auth-demo"
@@ -40,3 +38,6 @@ module "vm" {
   admin_username      = "azureuser"
   public_key          = var.public_key
 }
+
+
+
