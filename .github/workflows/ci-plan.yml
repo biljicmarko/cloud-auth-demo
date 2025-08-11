@@ -29,7 +29,9 @@ jobs:
         run: terraform validate
 
       - name: Terraform Plan
-        run: terraform plan -no-color -out=tfplan
+        env:
+          TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: terraform plan -input=false -no-color -out=tfplan
 
       - name: Show Plan
         run: terraform show -no-color tfplan
