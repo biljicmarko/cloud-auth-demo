@@ -13,9 +13,11 @@ terraform {
   }
 }
 
+
 provider "azurerm" {
   features {}
 }
+
 
 locals {
   project  = "cloud-auth-demo"
