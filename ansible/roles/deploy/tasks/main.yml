@@ -1,0 +1,325 @@
+- name: Ensure docker python SDK present
+  apt:
+    name: python3-docker
+    state: present
+    update_cache: yes
+
+- name: Check if docker CLI exists
+  command: which docker
+  register: docker_cli_check
+  ignore_errors: true
+
+
+- name: Install Docker repo prereqs
+  apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: yes
+  when: docker_cli_check.rc != 0
+  become: yes
+
+- name: Add Docker GPG key
+  ansible.builtin.command: >
+    bash -lc 'install -m 0755 -d /etc/apt/keyrings &&
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
+              gpg --dearmor -o /etc/apt/keyrings/docker.gpg &&
+              chmod a+r /etc/apt/keyrings/docker.gpg'
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+  when: docker_cli_check.rc != 0
+  become: yes
+
+- name: Map architecture for Docker repo
+  set_fact:
+    docker_arch: >-
+      {{ {'x86_64':'amd64','aarch64':'arm64'}.get(ansible_architecture, 'amd64') }}
+  when: docker_cli_check.rc != 0
+
+- name: Add Docker APT repo (Ubuntu)
+  copy:
+    dest: /etc/apt/sources.list.d/docker.list
+    mode: "0644"
+    content: |
+      deb [arch={{ docker_arch }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename | default('jammy') }} stable
+  when: docker_cli_check.rc != 0
+  become: yes
+
+- name: Install Docker Engine and Compose plugin
+  apt:
+    update_cache: yes
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+  when: docker_cli_check.rc != 0
+  become: yes
+
+- name: Ensure Docker service is enabled and running
+  service:
+    name: docker
+    state: started
+    enabled: yes
+  when: docker_cli_check.rc != 0
+  become: yes
+
+- name: Ensure apt cache (Ubuntu)
+  apt:
+    update_cache: yes
+
+- name: Report Docker presence
+  debug:
+    msg: "Docker already present at {{ docker_cli_check.stdout | default('unknown') }}. Skipping install."
+  when: docker_cli_check.rc == 0
+
+- name: Create project dir
+  file:
+    path: "{{ project_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render docker-compose.yml
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ project_dir }}/docker-compose.yml"
+    mode: "0644"
+
+- name: Start DB + Keycloak (compose v2)
+  community.docker.docker_compose_v2:
+    project_src: "{{ project_dir }}"
+    services:
+      - postgres
+      - keycloak
+    state: present
+    recreate: always
+
+- name: Wait for Keycloak TCP 8080 to be up
+  wait_for:
+    host: "127.0.0.1"
+    port: 8080
+    delay: 2
+    timeout: 900
+  become: false
+
+- block:
+    - name: Wait for Keycloak OIDC discovery
+      uri:
+        url: "http://127.0.0.1:8080/realms/master/.well-known/openid-configuration"
+        status_code: 200
+      register: kc_health
+      retries: 120
+      delay: 5
+      until: kc_health.status == 200
+  rescue:
+    - name: Show Keycloak logs on failure
+      command: docker logs z-task-keycloak-1
+      ignore_errors: true
+      register: kc_logs
+    - debug:
+        var: kc_logs.stdout
+    - fail:
+        msg: "Keycloak did not become ready in time. See logs above."
+
+- name: Wait for Keycloak TCP 8080 to be up
+  wait_for:
+    host: "127.0.0.1"
+    port: 8080
+    delay: 2
+    timeout: 900
+
+- block:
+    - name: Wait for Keycloak readiness (deep)
+      uri:
+        url: "http://127.0.0.1:8080/health/ready"
+        status_code: 200
+      register: kc_ready
+      retries: 120
+      delay: 5
+      until: kc_ready.status == 200
+  rescue:
+    - name: Show Keycloak logs on failure
+      command: docker logs z-task-keycloak-1
+      ignore_errors: true
+      register: kc_logs
+    - debug: var=kc_logs.stdout
+    - fail: msg="Keycloak not ready in time (see logs above)."
+
+- name: Compute compose network name
+  set_fact:
+    compose_net: "{{ compose_project_name | default('z-task') }}_default"
+
+- name: kcadm sanity (login via throwaway container on compose network)
+  command: >
+    docker run --rm --network {{ compose_net }}
+    quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} && echo OK"
+  register: kcadm_login
+  changed_when: false
+  retries: 8
+  delay: 5
+  until: kcadm_login.rc == 0
+
+- name: Check realm exists
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh get realms/{{ kc_realm }}"
+  register: realm_get
+  failed_when: false
+  changed_when: false
+
+- name: Create realm if missing
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh create realms
+              -s realm={{ kc_realm }} -s enabled=true"
+  when: realm_get.rc != 0
+
+- name: Find client by clientId
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh get clients -r {{ kc_realm }} -q clientId={{ kc_client_id }}"
+  register: client_list
+  changed_when: false
+
+- name: Create client if missing
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh create clients -r {{ kc_realm }}
+              -s clientId={{ kc_client_id }}
+              -s protocol=openid-connect
+              -s publicClient=false
+              -s standardFlowEnabled=true
+              -s directAccessGrantsEnabled=true
+              -s 'redirectUris=[\"{{ redirect_origin }}/*\"]'
+              -s 'webOrigins=[\"{{ redirect_origin }}\"]'"
+  when: (client_list.stdout | default("[]") | from_json | length) == 0
+
+- name: Refresh client list
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh get clients -r {{ kc_realm }} -q clientId={{ kc_client_id }}"
+  register: client_list_refreshed
+  changed_when: false
+
+- name: Set client internal id
+  set_fact:
+    kc_client_internal_id: "{{ (client_list_refreshed.stdout | from_json)[0].id }}"
+
+- name: Update client redirect URIs/webOrigins if needed
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh update clients/{{ kc_client_internal_id }} -r {{ kc_realm }}
+              -s 'redirectUris=[\"{{ redirect_origin }}/*\"]'
+              -s 'webOrigins=[\"{{ redirect_origin }}\"]'"
+  changed_when: true
+
+- name: Find user by username
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh get users -r {{ kc_realm }} -q username={{ kc_test_user }}"
+  register: kc_user_list
+  changed_when: false
+
+- name: Create user if missing
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh create users -r {{ kc_realm }}
+              -s username={{ kc_test_user }}
+              -s enabled=true
+              -s email='{{ kc_test_user_email | default(kc_test_user ~ "@example.com") }}'
+              -s emailVerified=true"
+  when: (kc_user_list.stdout | default("[]") | from_json | length) == 0
+
+- name: Refresh user list
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh get users -r {{ kc_realm }} -q username={{ kc_test_user }}"
+  register: kc_user_list_ref
+  changed_when: false
+
+- name: Capture user id
+  set_fact:
+    kc_user_id: "{{ (kc_user_list_ref.stdout | from_json)[0].id }}"
+
+- name: Set user password
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh set-password -r {{ kc_realm }}
+              --userid {{ kc_user_id }} --new-password '{{ kc_test_user_password }}' --temporary=false"
+
+- name: Read client secret
+  command: >
+    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
+    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
+              --server http://keycloak:8080 --realm master
+              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
+              /opt/keycloak/bin/kcadm.sh get clients/{{ kc_client_internal_id }}/client-secret -r {{ kc_realm }}"
+  register: client_secret_json
+  changed_when: false
+
+- name: Parse client secret value
+  set_fact:
+    kc_client_secret_value: "{{ (client_secret_json.stdout | from_json).value }}"
+
+- name: Render nginx.conf with injected secret
+  template:
+    src: nginx.conf.j2
+    dest: "{{ project_dir }}/nginx.conf"
+    mode: "0644"
+  vars:
+    injected_client_secret: "{{ kc_client_secret_value }}"
+
+- name: Verify nginx.conf is a file
+  stat:
+    path: "{{ project_dir }}/nginx.conf"
+  register: nginx_conf_stat
+
+- name: Fail if nginx.conf is not a regular file
+  fail:
+    msg: "Expected {{ project_dir }}/nginx.conf to be a regular file, but it is a directory."
+  when: not nginx_conf_stat.stat.isreg
+
+- name: Start/Reload nginx with new config
+  community.docker.docker_compose_v2:
+    project_src: "{{ project_dir }}"
+    services:
+      - nginx
+    state: present
+    recreate: always

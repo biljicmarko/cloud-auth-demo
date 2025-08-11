@@ -1,0 +1,14 @@
+project_dir: /opt/cloud-auth-demo
+compose_project_name: cloud-auth-demo
+
+# Keycloaks
+keycloak_admin: admin
+keycloak_admin_password: adminpass
+kc_realm: demo
+kc_client_id: demo-client
+kc_test_user: demo-user
+kc_test_user_password: demopass
+
+# Nginx image
+nginx_image: ghcr.io/biljicmarko/nginx-kc-auth
+nginx_image_tag: "v1"
