@@ -20,7 +20,7 @@ It deploys:
 ---
 
 ## 📂 Project Structure
-
+```bash
 terraform/
 │
 ├── main.tf # Main Terraform configuration
@@ -44,7 +44,7 @@ terraform/
 ansible/
 ├── playbook.yml # Installs and configures Keycloak, Postgres, Web server
 └── inventory.ini # Hosts inventory for Ansible
-
+```
 ## 🚀 Deployment to Azure
 
 ### 1. Create a Service Principal (SP)
