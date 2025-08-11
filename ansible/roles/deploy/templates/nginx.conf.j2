@@ -1,0 +1,36 @@
+worker_processes 1;
+events {}
+http {
+  lua_shared_dict discovery 1m;
+  lua_shared_dict jwks 1m;
+  lua_shared_dict sessions 10m;
+  resolver 127.0.0.11 ipv6=off;
+
+  server {
+    listen 80;
+    location / {
+      access_by_lua_block {
+        local opts = {
+          redirect_uri_path = "/_callback",
+          discovery = "http://keycloak:8080/realms/{{ kc_realm }}/.well-known/openid-configuration",
+          client_id = "{{ kc_client_id }}",
+          client_secret = "{{ injected_client_secret }}",
+          scope = "openid",
+          ssl_verify = "no",
+          cookie_path = "/",
+          session_contents = { id_token=true, access_token=true, user=true }
+        }
+        local openidc = require("resty.openidc")
+        local res, err = openidc.authenticate(opts)
+        if err then
+          ngx.status = 500
+          ngx.say("Authentication failed: ", err)
+          ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+        end
+      }
+      root /usr/local/openresty/nginx/html;
+      index index.html;
+    }
+  }
+}
+

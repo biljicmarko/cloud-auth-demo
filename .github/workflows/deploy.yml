@@ -1,0 +1,109 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "apply or destroy"
+        required: true
+        type: choice
+        options: [apply, destroy]
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      public_ip: ${{ steps.tf-outputs.outputs.public_ip }}
+      fqdn: ${{ steps.tf-outputs.outputs.fqdn }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Prepare SSH keys for TF
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # Izvuci PUBLIC iz PRIVATE
+          ssh-keygen -y -f ~/.ssh/id_rsa > /tmp/id_rsa.pub
+          PUB=$(cat /tmp/id_rsa.pub)
+          # Eksportuj kao TF varijablu (dostupno sledećim koracima u ovom jobu)
+          echo "TF_VAR_public_key=$PUB" >> $GITHUB_ENV
+          # (po potrebi i username, ako nije hardkodiran u root module)
+          echo "TF_VAR_admin_username=azureuser" >> $GITHUB_ENV
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Apply or Destroy
+        id: tf
+        run: |
+          if [ "${{ github.event.inputs.action }}" = "apply" ]; then
+            terraform apply -auto-approve
+          else
+            terraform destroy -auto-approve
+          fi
+
+      - name: Export outputs (only if apply)
+        id: tf-outputs
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          IP=$(terraform output -raw azure_public_ip || true)
+          FQDN=$(terraform output -raw azure_public_fqdn || true)
+          echo "public_ip=$IP" >> $GITHUB_OUTPUT
+          echo "fqdn=$FQDN" >> $GITHUB_OUTPUT
+
+  ansible:
+    needs: terraform
+    if: ${{ github.event.inputs.action == 'apply' && needs.terraform.outputs.public_ip != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ansible + deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible python3-docker sshpass
+
+      - name: Write SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Wait for SSH on VM
+        run: |
+          IP="${{ needs.terraform.outputs.public_ip }}"
+          for i in $(seq 1 60); do
+            nc -z -w 2 "$IP" 22 && echo "SSH up" && exit 0
+            sleep 5
+          done
+          echo "SSH not reachable" >&2
+          exit 1
+
+      - name: Add host key
+        run: |
+          IP="${{ needs.terraform.outputs.public_ip }}"
+          ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts
+
+      - name: Run Ansible play
+        working-directory: ansible
+        env:
+          FQDN: ${{ needs.terraform.outputs.fqdn }}
+          IP:   ${{ needs.terraform.outputs.public_ip }}
+        run: |
+          ansible-playbook -i "$IP," \
+            -u azureuser \
+            --private-key ~/.ssh/id_rsa \
+            -e "public_hostname=$FQDN public_ip=$IP" \
+            playbook.yml
