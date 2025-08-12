@@ -17,39 +17,50 @@ It deploys:
 - **terraform-plan.yml** — Runs on every Pull Request touching `terraform/**`. Validates Terraform configuration and shows a preview of planned changes.
 - **deploy.yml** — Manually triggered. Can run Terraform apply or Terraform destroy, followed by Ansible configuration.
 
----
 
 ## Project Structure
 ```bash
 terraform/
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   │
+│   └── modules/
+│       ├── network/
+│       │   ├── main.tf
+│       │   ├── variables.tf
+│       │   └── outputs.tf
+│       └── vm/
+│           ├── main.tf
+│           ├── variables.tf
+│           └── outputs.tf
 │
-├── main.tf # Main Terraform configuration
-├── variables.tf # Global variables
-├── outputs.tf # Global outputs
+nginx/
+│   ├── html/
+│   │   └── index.html
+│   ├── Dockerfile
+│   └── nginx.conf
 │
-├── modules/
-│ ├── network/ # Networking module
-│ │ ├── main.tf
-│ │ ├── variables.tf
-│ │ └── outputs.tf
-│ └── vm/ # Virtual Machine module
-│ ├── main.tf
-│ ├── variables.tf
-│ └── outputs.tf
-│
-├── nginx/
-│ ├── html/ # Networking module
-│ │ └── index.html
-│ ├── Dockerfile
-│ └── nginx.conf
-│ 
-.github/workflows/
-│ ├── terraform-plan.yml # CI for Terraform validation & planning
-│ └── deploy.yml # CI/CD for Terraform apply or destroy + Ansible
+.github/
+│   └── workflows/
+│       ├── terraform-plan.yml
+│       └── deploy.yml
 │
 ansible/
-├── playbook.yml # Installs and configures Keycloak, Postgres, Web server
-└── inventory.ini # Hosts inventory for Ansible
+│   ├── group_vars/
+│   │   └── all.yml
+│   ├── inventory/
+│   │   └── hosts.ini
+│   ├── roles/
+│   │   └── deploy/
+│   │       ├── tasks/
+│   │       │   └── main.yml
+│   │       └── templates/
+│   │           ├── docker-compose.yml.j2
+│   │           └── nginx.conf.j2
+│   ├── ansible.cfg
+│   └── playbook.yml
+
 ```
 ## Deployment to Azure
 
