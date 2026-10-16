@@ -14,3 +14,7 @@ kc_test_user_password: demopass
 # Nginx image
 nginx_image: ghcr.io/biljicmarko/nginx-kc-auth
 nginx_image_tag: "v1"
+
+# Public entry point (overridden by the workflow: -e public_hostname=<FQDN>)
+public_hostname: localhost
+redirect_origin: "http://{{ public_hostname }}"

@@ -18,7 +18,7 @@ services:
       KC_DB_PASSWORD: keycloakpass
       KC_DB_URL_HOST: postgres
       KC_DB_URL_DATABASE: keycloak
-      KC_HOSTNAME: "{{ public_hostname | default(public_ip | default('localhost')) }}"
+      KC_HOSTNAME: "{{ public_hostname }}"
       KC_HOSTNAME_PORT: 8080
       KC_HOSTNAME_STRICT: "false"
       KC_HOSTNAME_STRICT_HTTPS: "false"
@@ -30,7 +30,7 @@ services:
     image: "{{ nginx_image }}:{{ nginx_image_tag }}"
     volumes:
       - {{ project_dir }}/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
-    ports: ["8081:80"]
+    ports: ["80:80"]
     depends_on: [keycloak]
 volumes:
   postgres_data:
