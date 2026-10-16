@@ -7,6 +7,7 @@ keycloak_admin: admin
 keycloak_admin_password: adminpass
 kc_realm: demo
 kc_client_id: demo-client
+kc_client_secret: change-me-local-only
 kc_test_user: demo-user
 kc_test_user_password: demopass
 

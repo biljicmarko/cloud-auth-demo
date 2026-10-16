@@ -149,162 +149,57 @@
     - ansible.builtin.debug: var=kc_logs.stdout
     - ansible.builtin.fail: msg="Keycloak not ready in time (see logs above)."
 
-- name: Compute compose network name
-  ansible.builtin.set_fact:
-    compose_net: "{{ compose_project_name | default('z-task') }}_default"
+- name: Bootstrap Keycloak realm, client and test user
+  module_defaults:
+    group/community.general.keycloak:
+      auth_client_id: admin-cli
+      auth_keycloak_url: http://127.0.0.1:8080
+      auth_realm: master
+      auth_username: "{{ keycloak_admin }}"
+      auth_password: "{{ keycloak_admin_password }}"
+  block:
+    - name: Ensure realm exists
+      community.general.keycloak_realm:
+        id: "{{ kc_realm }}"
+        realm: "{{ kc_realm }}"
+        enabled: true
+        state: present
 
-- name: Kcadm sanity (login via throwaway container on compose network)
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }}
-    quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} && echo OK"
-  register: kcadm_login
-  changed_when: false
-  retries: 8
-  delay: 5
-  until: kcadm_login.rc == 0
+    - name: Ensure OIDC client exists
+      community.general.keycloak_client:
+        realm: "{{ kc_realm }}"
+        client_id: "{{ kc_client_id }}"
+        protocol: openid-connect
+        public_client: false
+        secret: "{{ kc_client_secret }}"
+        standard_flow_enabled: true
+        direct_access_grants_enabled: true
+        redirect_uris:
+          - "{{ redirect_origin }}/*"
+        web_origins:
+          - "{{ redirect_origin }}"
+        state: present
 
-- name: Check realm exists
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh get realms/{{ kc_realm }}"
-  register: realm_get
-  failed_when: false
-  changed_when: false
+    - name: Ensure test user exists
+      community.general.keycloak_user:
+        realm: "{{ kc_realm }}"
+        username: "{{ kc_test_user }}"
+        first_name: Demo
+        last_name: User
+        email: "{{ kc_test_user_email | default(kc_test_user ~ '@example.com') }}"
+        email_verified: true
+        enabled: true
+        credentials:
+          - type: password
+            value: "{{ kc_test_user_password }}"
+            temporary: false
+        state: present
 
-- name: Create realm if missing
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh create realms
-              -s realm={{ kc_realm }} -s enabled=true"
-  when: realm_get.rc != 0
-
-- name: Find client by clientId
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh get clients -r {{ kc_realm }} -q clientId={{ kc_client_id }}"
-  register: client_list
-  changed_when: false
-
-- name: Create client if missing
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh create clients -r {{ kc_realm }}
-              -s clientId={{ kc_client_id }}
-              -s protocol=openid-connect
-              -s publicClient=false
-              -s standardFlowEnabled=true
-              -s directAccessGrantsEnabled=true
-              -s 'redirectUris=[\"{{ redirect_origin }}/*\"]'
-              -s 'webOrigins=[\"{{ redirect_origin }}\"]'"
-  when: (client_list.stdout | default("[]") | from_json | length) == 0
-
-- name: Refresh client list
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh get clients -r {{ kc_realm }} -q clientId={{ kc_client_id }}"
-  register: client_list_refreshed
-  changed_when: false
-
-- name: Set client internal id
-  ansible.builtin.set_fact:
-    kc_client_internal_id: "{{ (client_list_refreshed.stdout | from_json)[0].id }}"
-
-- name: Update client redirect URIs/webOrigins if needed
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh update clients/{{ kc_client_internal_id }} -r {{ kc_realm }}
-              -s 'redirectUris=[\"{{ redirect_origin }}/*\"]'
-              -s 'webOrigins=[\"{{ redirect_origin }}\"]'"
-  changed_when: true
-
-- name: Find user by username
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh get users -r {{ kc_realm }} -q username={{ kc_test_user }}"
-  register: kc_user_list
-  changed_when: false
-
-- name: Create user if missing
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh create users -r {{ kc_realm }}
-              -s username={{ kc_test_user }}
-              -s enabled=true
-              -s email='{{ kc_test_user_email | default(kc_test_user ~ "@example.com") }}'
-              -s emailVerified=true"
-  when: (kc_user_list.stdout | default("[]") | from_json | length) == 0
-
-- name: Refresh user list
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh get users -r {{ kc_realm }} -q username={{ kc_test_user }}"
-  register: kc_user_list_ref
-  changed_when: false
-
-- name: Capture user id
-  ansible.builtin.set_fact:
-    kc_user_id: "{{ (kc_user_list_ref.stdout | from_json)[0].id }}"
-
-- name: Set user password
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh set-password -r {{ kc_realm }}
-              --userid {{ kc_user_id }} --new-password '{{ kc_test_user_password }}' --temporary=false"
-
-- name: Read client secret
-  ansible.builtin.command: >
-    docker run --rm --network {{ compose_net }} quay.io/keycloak/keycloak:24.0
-    bash -lc "/opt/keycloak/bin/kcadm.sh config credentials
-              --server http://keycloak:8080 --realm master
-              --user {{ keycloak_admin }} --password {{ keycloak_admin_password }} &&
-              /opt/keycloak/bin/kcadm.sh get clients/{{ kc_client_internal_id }}/client-secret -r {{ kc_realm }}"
-  register: client_secret_json
-  changed_when: false
-
-- name: Parse client secret value
-  ansible.builtin.set_fact:
-    kc_client_secret_value: "{{ (client_secret_json.stdout | from_json).value }}"
-
-- name: Render nginx.conf with injected secret
+- name: Render nginx.conf
   ansible.builtin.template:
     src: nginx.conf.j2
     dest: "{{ project_dir }}/nginx.conf"
     mode: "0644"
-  vars:
-    injected_client_secret: "{{ kc_client_secret_value }}"
 
 - name: Verify nginx.conf is a file
   ansible.builtin.stat:
