@@ -1,0 +1,5 @@
+---
+# Enforced in CI (.github/workflows/e2e.yml)
+profile: production
+exclude_paths:
+  - ../.venv/

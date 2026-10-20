@@ -1,6 +1,6 @@
+---
 - name: Deploy local container stack
   hosts: all
-  become: yes
+  become: true
   roles:
     - deploy
-

@@ -14,7 +14,7 @@ http {
           redirect_uri_path = "/_callback",
           discovery = "http://keycloak:8080/realms/{{ kc_realm }}/.well-known/openid-configuration",
           client_id = "{{ kc_client_id }}",
-          client_secret = "{{ injected_client_secret }}",
+          client_secret = "{{ kc_client_secret }}",
           scope = "openid",
           ssl_verify = "no",
           cookie_path = "/",
