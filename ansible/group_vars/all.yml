@@ -11,6 +11,7 @@ kc_client_id: demo-client
 kc_client_secret: change-me-local-only
 kc_test_user: demo-user
 kc_test_user_password: demopass
+postgres_password: keycloakpass
 
 # Nginx image
 nginx_image: ghcr.io/biljicmarko/nginx-kc-auth

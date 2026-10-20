@@ -4,14 +4,36 @@ http {
   lua_shared_dict discovery 1m;
   lua_shared_dict jwks 1m;
   lua_shared_dict sessions 10m;
+  # Docker's embedded DNS, resolves compose service names for lua-resty-http
   resolver 127.0.0.11 ipv6=off;
 
   server {
     listen 80;
+
+    # Keycloak login pages and OIDC endpoints, served through this entry point
+    location /realms/ {
+      proxy_pass http://keycloak:8080;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Static assets (CSS/JS) of the Keycloak login theme
+    location /resources/ {
+      proxy_pass http://keycloak:8080;
+      proxy_set_header Host $http_host;
+    }
+
+    # The admin realm is never exposed publicly
+    location /realms/master/ {
+      return 404;
+    }
+
     location / {
       access_by_lua_block {
         local opts = {
           redirect_uri_path = "/_callback",
+          -- Backchannel: nginx talks to Keycloak directly on the compose network
           discovery = "http://keycloak:8080/realms/{{ kc_realm }}/.well-known/openid-configuration",
           client_id = "{{ kc_client_id }}",
           client_secret = "{{ kc_client_secret }}",
@@ -23,8 +45,9 @@ http {
         local openidc = require("resty.openidc")
         local res, err = openidc.authenticate(opts)
         if err then
+          ngx.log(ngx.ERR, "OIDC error: ", err)
           ngx.status = 500
-          ngx.say("Authentication failed: ", err)
+          ngx.say("Authentication failed")
           ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
         end
       }
@@ -33,4 +56,3 @@ http {
     }
   }
 }
-
