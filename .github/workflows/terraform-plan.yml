@@ -1,0 +1,84 @@
+name: terraform-plan
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-plan.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Runs on every PR, no cloud credentials needed
+  static:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Format
+        run: terraform fmt -check -recursive
+
+      - name: Init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform validate
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.64.0
+
+      - name: TFLint
+        run: |
+          tflint --init
+          tflint --recursive
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Tests (mocked providers)
+        run: terraform test
+
+  # Real plan against Azure; runs only when the repo has Azure configured
+  # (repository variables AZURE_CLIENT_ID etc., see README "Bootstrap").
+  plan:
+    needs: static
+    if: vars.AZURE_CLIENT_ID != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_allowed_ssh_cidrs: ${{ vars.ALLOWED_SSH_CIDRS || '[]' }}
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Init (remote state)
+        run: >
+          terraform init -input=false
+          -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}"
+          -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}"
+          -backend-config="container_name=tfstate"
+          -backend-config="key=cloud-auth-demo.tfstate"
+
+      - name: Plan
+        run: terraform plan -input=false -no-color -lock-timeout=5m

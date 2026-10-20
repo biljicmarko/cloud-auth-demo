@@ -9,107 +9,139 @@ on:
         type: choice
         options: [apply, destroy]
 
+permissions:
+  contents: read
+  id-token: write # OIDC federation with Azure, no stored client secret
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
 jobs:
   terraform:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: terraform
+    env:
+      TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_allowed_ssh_cidrs: ${{ vars.ALLOWED_SSH_CIDRS || '[]' }}
     outputs:
       public_ip: ${{ steps.tf-outputs.outputs.public_ip }}
       fqdn: ${{ steps.tf-outputs.outputs.fqdn }}
+      resource_group: ${{ steps.tf-outputs.outputs.resource_group }}
+      nsg: ${{ steps.tf-outputs.outputs.nsg }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure login
-        uses: azure/login@v2
+      - uses: hashicorp/setup-terraform@v3
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - name: Init (remote state)
+        run: >
+          terraform init -input=false
+          -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}"
+          -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}"
+          -backend-config="container_name=tfstate"
+          -backend-config="key=cloud-auth-demo.tfstate"
 
-      - name: Prepare SSH keys for TF
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          # Izvuci PUBLIC iz PRIVATE
-          ssh-keygen -y -f ~/.ssh/id_rsa > /tmp/id_rsa.pub
-          PUB=$(cat /tmp/id_rsa.pub)
-          # Eksportuj kao TF varijablu (dostupno sledećim koracima u ovom jobu)
-          echo "TF_VAR_public_key=$PUB" >> $GITHUB_ENV
-          # (po potrebi i username, ako nije hardkodiran u root module)
-          echo "TF_VAR_admin_username=azureuser" >> $GITHUB_ENV
+      - name: Terraform ${{ inputs.action }}
+        run: terraform ${{ inputs.action }} -auto-approve -input=false -lock-timeout=5m
 
-      - name: Terraform Init
-        run: terraform init -input=false
-
-      - name: Terraform Apply or Destroy
-        id: tf
-        env:
-          TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-        run: |
-          if [ "${{ github.event.inputs.action }}" = "apply" ]; then
-            terraform apply -auto-approve
-          else
-            terraform destroy -auto-approve
-          fi
-
-      - name: Export outputs (only if apply)
+      - name: Export outputs
         id: tf-outputs
-        if: ${{ github.event.inputs.action == 'apply' }}
+        if: inputs.action == 'apply'
         run: |
-          IP=$(terraform output -raw azure_public_ip || true)
-          FQDN=$(terraform output -raw azure_public_fqdn || true)
-          echo "public_ip=$IP" >> $GITHUB_OUTPUT
-          echo "fqdn=$FQDN" >> $GITHUB_OUTPUT
+          {
+            echo "public_ip=$(terraform output -raw azure_public_ip)"
+            echo "fqdn=$(terraform output -raw azure_public_fqdn)"
+            echo "resource_group=$(terraform output -raw resource_group_name)"
+            echo "nsg=$(terraform output -raw nsg_name)"
+          } >> "$GITHUB_OUTPUT"
 
   ansible:
     needs: terraform
-    if: ${{ github.event.inputs.action == 'apply' && needs.terraform.outputs.public_ip != '' }}
-    runs-on: ubuntu-latest
+    if: inputs.action == 'apply'
+    runs-on: ubuntu-24.04
+    env:
+      IP: ${{ needs.terraform.outputs.public_ip }}
+      FQDN: ${{ needs.terraform.outputs.fqdn }}
+      RG: ${{ needs.terraform.outputs.resource_group }}
+      NSG: ${{ needs.terraform.outputs.nsg }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Ansible + deps
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install pinned toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ansible python3-docker sshpass
+          pip install -r requirements-dev.txt
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # SSH is closed by default; open it for this runner's IP only
+      - name: Open SSH for this runner
+        run: |
+          RUNNER_IP="$(curl -fsS https://api.ipify.org)"
+          az network nsg rule create -g "$RG" --nsg-name "$NSG" -n gha-runner-ssh \
+            --priority 90 --direction Inbound --access Allow --protocol Tcp \
+            --destination-port-ranges 22 --source-address-prefixes "$RUNNER_IP/32" \
+            --output none
 
       - name: Write SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-      - name: Wait for SSH on VM
+      - name: Wait for SSH and record host key
         run: |
-          IP="${{ needs.terraform.outputs.public_ip }}"
-          for i in $(seq 1 60); do
-            nc -z -w 2 "$IP" 22 && echo "SSH up" && exit 0
+          for _ in $(seq 1 60); do
+            if nc -z -w 2 "$IP" 22; then
+              ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts
+              exit 0
+            fi
             sleep 5
           done
-          echo "SSH not reachable" >&2
+          echo "::error::SSH on $IP not reachable"
           exit 1
 
-      - name: Add host key
-        run: |
-          IP="${{ needs.terraform.outputs.public_ip }}"
-          ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts
-
-      - name: Run Ansible play
+      - name: Run Ansible
         working-directory: ansible
         env:
-          FQDN: ${{ needs.terraform.outputs.fqdn }}
-          IP:   ${{ needs.terraform.outputs.public_ip }}
           KEYCLOAK_ADMIN_PASSWORD: ${{ secrets.KEYCLOAK_ADMIN_PASSWORD }}
           KC_CLIENT_SECRET: ${{ secrets.KC_CLIENT_SECRET }}
           KC_TEST_USER_PASSWORD: ${{ secrets.KC_TEST_USER_PASSWORD }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-        run: |
-          ansible-playbook -i "$IP," \
-            -u azureuser \
-            --private-key ~/.ssh/id_rsa \
-            -e "public_hostname=$FQDN public_ip=$IP" \
-            playbook.yml
+        run: >
+          ansible-playbook -i "$IP," --private-key ~/.ssh/id_rsa
+          -e "public_hostname=$FQDN" playbook.yml
+
+      - name: Smoke test (OIDC login through the public endpoint)
+        env:
+          BASE_URL: http://${{ needs.terraform.outputs.fqdn }}
+          KC_TEST_USER_PASSWORD: ${{ secrets.KC_TEST_USER_PASSWORD }}
+        run: tests/e2e.sh
+
+      - name: Close SSH again
+        if: always()
+        run: az network nsg rule delete -g "$RG" --nsg-name "$NSG" -n gha-runner-ssh --output none || true
