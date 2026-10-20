@@ -5,12 +5,18 @@ compose_project_name: cloud-auth-demo
 # Keycloak (keycloak_local_url: admin API as seen from the VM itself)
 keycloak_local_url: http://127.0.0.1:8080
 keycloak_admin: admin
-keycloak_admin_password: adminpass
 kc_realm: demo
 kc_client_id: demo-client
-kc_client_secret: change-me-local-only
 kc_test_user: demo-user
-kc_test_user_password: demopass
+
+# Secrets come from the controller's environment (GitHub Secrets in CI/CD).
+# The defaults are for local/e2e runs only; deploying them to a public
+# hostname is refused by the role (see tasks/main.yml).
+keycloak_admin_password: "{{ lookup('ansible.builtin.env', 'KEYCLOAK_ADMIN_PASSWORD', default='adminpass') }}"
+kc_client_secret: "{{ lookup('ansible.builtin.env', 'KC_CLIENT_SECRET', default='change-me-local-only') }}"
+kc_test_user_password: "{{ lookup('ansible.builtin.env', 'KC_TEST_USER_PASSWORD', default='demopass') }}"
+postgres_password: "{{ lookup('ansible.builtin.env', 'POSTGRES_PASSWORD', default='keycloakpass') }}"
+deploy_insecure_defaults: [adminpass, change-me-local-only, demopass, keycloakpass]
 
 # Nginx image
 nginx_image: ghcr.io/biljicmarko/nginx-kc-auth

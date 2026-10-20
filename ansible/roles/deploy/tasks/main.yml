@@ -1,4 +1,17 @@
 ---
+- name: Refuse local-only default secrets on a public hostname
+  ansible.builtin.assert:
+    that:
+      - keycloak_admin_password not in deploy_insecure_defaults
+      - kc_client_secret not in deploy_insecure_defaults
+      - kc_test_user_password not in deploy_insecure_defaults
+      - postgres_password not in deploy_insecure_defaults
+    fail_msg: >-
+      Default secrets are for local runs only. Set KEYCLOAK_ADMIN_PASSWORD,
+      KC_CLIENT_SECRET, KC_TEST_USER_PASSWORD and POSTGRES_PASSWORD.
+    quiet: true
+  when: public_hostname not in ['localhost', '127.0.0.1']
+
 - name: Ensure docker python SDK present
   ansible.builtin.apt:
     name: python3-docker
