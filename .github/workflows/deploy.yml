@@ -103,6 +103,10 @@ jobs:
         env:
           FQDN: ${{ needs.terraform.outputs.fqdn }}
           IP:   ${{ needs.terraform.outputs.public_ip }}
+          KEYCLOAK_ADMIN_PASSWORD: ${{ secrets.KEYCLOAK_ADMIN_PASSWORD }}
+          KC_CLIENT_SECRET: ${{ secrets.KC_CLIENT_SECRET }}
+          KC_TEST_USER_PASSWORD: ${{ secrets.KC_TEST_USER_PASSWORD }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
           ansible-playbook -i "$IP," \
             -u azureuser \
