@@ -2,7 +2,8 @@
 project_dir: /opt/cloud-auth-demo
 compose_project_name: cloud-auth-demo
 
-# Keycloaks
+# Keycloak (keycloak_local_url: admin API as seen from the VM itself)
+keycloak_local_url: http://127.0.0.1:8080
 keycloak_admin: admin
 keycloak_admin_password: adminpass
 kc_realm: demo

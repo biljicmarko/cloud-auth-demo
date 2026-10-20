@@ -79,7 +79,7 @@
   block:
     - name: Poll Keycloak readiness endpoint
       ansible.builtin.uri:
-        url: http://127.0.0.1:8080/health/ready
+        url: "{{ keycloak_local_url }}/health/ready"
         status_code: 200
       register: deploy_kc_ready
       until: deploy_kc_ready.status == 200
@@ -98,51 +98,8 @@
       ansible.builtin.fail:
         msg: Keycloak did not become ready within 5 minutes, see logs above.
 
-- name: Bootstrap Keycloak realm, client and test user
-  module_defaults:
-    group/community.general.keycloak:
-      auth_client_id: admin-cli
-      auth_keycloak_url: http://127.0.0.1:8080
-      auth_realm: master
-      auth_username: "{{ keycloak_admin }}"
-      auth_password: "{{ keycloak_admin_password }}"
-  block:
-    - name: Ensure realm exists
-      community.general.keycloak_realm:
-        id: "{{ kc_realm }}"
-        realm: "{{ kc_realm }}"
-        enabled: true
-        state: present
-
-    - name: Ensure OIDC client exists
-      community.general.keycloak_client:
-        realm: "{{ kc_realm }}"
-        client_id: "{{ kc_client_id }}"
-        protocol: openid-connect
-        public_client: false
-        secret: "{{ kc_client_secret }}"
-        standard_flow_enabled: true
-        direct_access_grants_enabled: true
-        redirect_uris:
-          - "{{ redirect_origin }}/*"
-        web_origins:
-          - "{{ redirect_origin }}"
-        state: present
-
-    - name: Ensure test user exists
-      community.general.keycloak_user:
-        realm: "{{ kc_realm }}"
-        username: "{{ kc_test_user }}"
-        first_name: Demo
-        last_name: User
-        email: "{{ kc_test_user_email | default(kc_test_user ~ '@example.com') }}"
-        email_verified: true
-        enabled: true
-        credentials:
-          - type: password
-            value: "{{ kc_test_user_password }}"
-            temporary: false
-        state: present
+- name: Bootstrap Keycloak
+  ansible.builtin.import_tasks: keycloak.yml
 
 - name: Render nginx.conf
   ansible.builtin.template:
