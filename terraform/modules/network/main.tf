@@ -17,46 +17,49 @@ resource "azurerm_subnet" "main" {
   address_prefixes     = ["10.0.1.0/24"]
 }
 
+# Rules are separate resources (not inline blocks), so the temporary SSH rule
+# the deploy workflow adds for its runner is not removed by the next apply.
 resource "azurerm_network_security_group" "main" {
   name                = "nsg-${var.name}"
   location            = var.location
   resource_group_name = azurerm_resource_group.main.name
+}
 
-  security_rule {
-    name                       = "ssh"
-    priority                   = 100
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "22"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
+# Public entry point: nginx (Keycloak is served behind it, port 8080 is not exposed)
+resource "azurerm_network_security_rule" "http" {
+  name                        = "http"
+  priority                    = 110
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "80"
+  source_address_prefix       = "*"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.main.name
+}
 
-  security_rule {
-    name                       = "http"
-    priority                   = 110
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "80"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
+resource "azurerm_network_security_rule" "ssh" {
+  count = length(var.allowed_ssh_cidrs) > 0 ? 1 : 0
 
-  security_rule {
-    name                       = "keycloak"
-    priority                   = 120
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "8080"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
+  name                        = "ssh-admin"
+  priority                    = 100
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "22"
+  source_address_prefixes     = var.allowed_ssh_cidrs
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.main.name
+}
+
+resource "random_string" "suffix" {
+  length  = 6
+  special = false
+  upper   = false
 }
 
 resource "azurerm_public_ip" "main" {
@@ -66,13 +69,7 @@ resource "azurerm_public_ip" "main" {
   allocation_method       = "Static"
   sku                     = "Standard"
   idle_timeout_in_minutes = 4
-  domain_name_label       = "cloud-auth-demo-${random_string.suffix.result}"
-}
-
-resource "random_string" "suffix" {
-  length  = 6
-  special = false
-  upper   = false
+  domain_name_label       = "${var.name}-${random_string.suffix.result}"
 }
 
 resource "azurerm_subnet_network_security_group_association" "main" {

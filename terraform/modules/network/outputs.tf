@@ -21,3 +21,7 @@ output "public_fqdn" {
 output "location" {
   value = azurerm_resource_group.main.location
 }
+
+output "nsg_name" {
+  value = azurerm_network_security_group.main.name
+}

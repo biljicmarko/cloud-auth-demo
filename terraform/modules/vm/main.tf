@@ -16,7 +16,7 @@ resource "azurerm_linux_virtual_machine" "main" {
   location                        = var.location
   resource_group_name             = var.resource_group_name
   network_interface_ids           = [azurerm_network_interface.main.id]
-  size                            = "Standard_B1s"
+  size                            = var.size
   admin_username                  = var.admin_username
   disable_password_authentication = true
 
@@ -33,7 +33,7 @@ resource "azurerm_linux_virtual_machine" "main" {
   source_image_reference {
     publisher = "Canonical"
     offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts"
+    sku       = "22_04-lts-gen2"
     version   = "latest"
   }
 }
