@@ -2,7 +2,8 @@
 project_dir: /opt/cloud-auth-demo
 compose_project_name: cloud-auth-demo
 
-# Keycloaks
+# Keycloak (keycloak_local_url: admin API as seen from the VM itself)
+keycloak_local_url: http://127.0.0.1:8080
 keycloak_admin: admin
 keycloak_admin_password: adminpass
 kc_realm: demo
@@ -13,7 +14,8 @@ kc_test_user_password: demopass
 
 # Nginx image
 nginx_image: ghcr.io/biljicmarko/nginx-kc-auth
-nginx_image_tag: "v1"
+# Published by .github/workflows/nginx-image.yml (tags: latest, sha-<commit>)
+nginx_image_tag: latest
 
 # Public entry point (overridden by the workflow: -e public_hostname=<FQDN>)
 public_hostname: localhost
