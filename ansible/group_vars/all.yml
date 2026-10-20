@@ -14,7 +14,8 @@ kc_test_user_password: demopass
 
 # Nginx image
 nginx_image: ghcr.io/biljicmarko/nginx-kc-auth
-nginx_image_tag: "v1"
+# Published by .github/workflows/nginx-image.yml (tags: latest, sha-<commit>)
+nginx_image_tag: latest
 
 # Public entry point (overridden by the workflow: -e public_hostname=<FQDN>)
 public_hostname: localhost
