@@ -4,78 +4,55 @@
     name: python3-docker
     state: present
     update_cache: true
+    cache_valid_time: 3600
 
 - name: Check if docker CLI exists
   ansible.builtin.command: which docker
-  register: docker_cli_check
-  ignore_errors: true
+  register: deploy_docker_cli
+  changed_when: false
+  failed_when: false
 
-- name: Install Docker repo prereqs
-  ansible.builtin.apt:
-    name:
-      - ca-certificates
-      - curl
-      - gnupg
-    state: present
-    update_cache: true
-  when: docker_cli_check.rc != 0
-  become: true
+- name: Install Docker
+  when: deploy_docker_cli.rc != 0
+  block:
+    - name: Install Docker repo prereqs
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - python3-debian
+        state: present
 
-- name: Add Docker GPG key
-  ansible.builtin.command: >
-    bash -lc 'install -m 0755 -d /etc/apt/keyrings &&
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
-              gpg --dearmor -o /etc/apt/keyrings/docker.gpg &&
-              chmod a+r /etc/apt/keyrings/docker.gpg'
-  args:
-    creates: /etc/apt/keyrings/docker.gpg
-  when: docker_cli_check.rc != 0
-  become: true
+    - name: Map architecture for Docker repo
+      ansible.builtin.set_fact:
+        deploy_docker_arch: >-
+          {{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'], 'amd64') }}
 
-- name: Map architecture for Docker repo
-  ansible.builtin.set_fact:
-    docker_arch: >-
-      {{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_architecture, 'amd64') }}
-  when: docker_cli_check.rc != 0
+    - name: Add Docker APT repo (Ubuntu)
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: deb
+        uris: https://download.docker.com/linux/ubuntu
+        suites: "{{ ansible_facts['distribution_release'] }}"
+        components: stable
+        architectures: "{{ deploy_docker_arch }}"
+        signed_by: https://download.docker.com/linux/ubuntu/gpg
 
-- name: Add Docker APT repo (Ubuntu)
-  ansible.builtin.copy:
-    dest: /etc/apt/sources.list.d/docker.list
-    mode: "0644"
-    content: |
-      deb [arch={{ docker_arch }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename | default('jammy') }} stable
-  when: docker_cli_check.rc != 0
-  become: true
+    - name: Install Docker Engine and Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
 
-- name: Install Docker Engine and Compose plugin
-  ansible.builtin.apt:
-    update_cache: true
-    name:
-      - docker-ce
-      - docker-ce-cli
-      - containerd.io
-      - docker-buildx-plugin
-      - docker-compose-plugin
-    state: present
-  when: docker_cli_check.rc != 0
-  become: true
-
-- name: Ensure Docker service is enabled and running
-  ansible.builtin.service:
-    name: docker
-    state: started
-    enabled: true
-  when: docker_cli_check.rc != 0
-  become: true
-
-- name: Ensure apt cache (Ubuntu)
-  ansible.builtin.apt:
-    update_cache: true
-
-- name: Report Docker presence
-  ansible.builtin.debug:
-    msg: "Docker already present at {{ docker_cli_check.stdout | default('unknown') }}. Skipping install."
-  when: docker_cli_check.rc == 0
+    - name: Ensure Docker service is enabled and running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
 
 - name: Create project dir
   ansible.builtin.file:
@@ -91,63 +68,35 @@
 
 - name: Start DB + Keycloak (compose v2)
   community.docker.docker_compose_v2:
+    project_name: "{{ compose_project_name }}"
     project_src: "{{ project_dir }}"
     services:
       - postgres
       - keycloak
     state: present
-    recreate: always
 
-- name: Wait for Keycloak TCP 8080 to be up
-  ansible.builtin.wait_for:
-    host: "127.0.0.1"
-    port: 8080
-    delay: 2
-    timeout: 900
-  become: false
-
-- block:
-    - name: Wait for Keycloak OIDC discovery
+- name: Wait for Keycloak to become ready
+  block:
+    - name: Poll Keycloak readiness endpoint
       ansible.builtin.uri:
-        url: "http://127.0.0.1:8080/realms/master/.well-known/openid-configuration"
+        url: http://127.0.0.1:8080/health/ready
         status_code: 200
-      register: kc_health
-      retries: 120
+      register: deploy_kc_ready
+      until: deploy_kc_ready.status == 200
+      retries: 60
       delay: 5
-      until: kc_health.status == 200
   rescue:
-    - name: Show Keycloak logs on failure
-      ansible.builtin.command: docker logs z-task-keycloak-1
-      ignore_errors: true
-      register: kc_logs
-    - ansible.builtin.debug:
-        var: kc_logs.stdout
-    - ansible.builtin.fail:
-        msg: "Keycloak did not become ready in time. See logs above."
-
-- name: Wait for Keycloak TCP 8080 to be up
-  ansible.builtin.wait_for:
-    host: "127.0.0.1"
-    port: 8080
-    delay: 2
-    timeout: 900
-
-- block:
-    - name: Wait for Keycloak readiness (deep)
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:8080/health/ready"
-        status_code: 200
-      register: kc_ready
-      retries: 120
-      delay: 5
-      until: kc_ready.status == 200
-  rescue:
-    - name: Show Keycloak logs on failure
-      ansible.builtin.command: docker logs z-task-keycloak-1
-      ignore_errors: true
-      register: kc_logs
-    - ansible.builtin.debug: var=kc_logs.stdout
-    - ansible.builtin.fail: msg="Keycloak not ready in time (see logs above)."
+    - name: Read Keycloak logs
+      ansible.builtin.command: docker compose --project-directory {{ project_dir }} logs keycloak
+      register: deploy_kc_logs
+      changed_when: false
+      failed_when: false
+    - name: Print Keycloak logs
+      ansible.builtin.debug:
+        var: deploy_kc_logs.stdout_lines
+    - name: Abort deployment
+      ansible.builtin.fail:
+        msg: Keycloak did not become ready within 5 minutes, see logs above.
 
 - name: Bootstrap Keycloak realm, client and test user
   module_defaults:
@@ -200,21 +149,22 @@
     src: nginx.conf.j2
     dest: "{{ project_dir }}/nginx.conf"
     mode: "0644"
+  notify: Restart nginx
 
 - name: Verify nginx.conf is a file
   ansible.builtin.stat:
     path: "{{ project_dir }}/nginx.conf"
-  register: nginx_conf_stat
+  register: deploy_nginx_conf_stat
 
 - name: Fail if nginx.conf is not a regular file
   ansible.builtin.fail:
     msg: "Expected {{ project_dir }}/nginx.conf to be a regular file, but it is a directory."
-  when: not nginx_conf_stat.stat.isreg
+  when: not deploy_nginx_conf_stat.stat.isreg
 
-- name: Start/Reload nginx with new config
+- name: Start nginx
   community.docker.docker_compose_v2:
+    project_name: "{{ compose_project_name }}"
     project_src: "{{ project_dir }}"
     services:
       - nginx
     state: present
-    recreate: always
